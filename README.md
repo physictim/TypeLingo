@@ -3,6 +3,12 @@
 **Type Chinese, instantly see the best English — learn as you type.**
 打中文，即時看到最好的英文 — 邊打邊學的 macOS 翻譯浮窗。
 
+> 繁體中文說明：[README.zh-Hant.md](README.zh-Hant.md)
+
+| Live translation | English assistant | Settings |
+|---|---|---|
+| ![live translation](docs/panel.png) | ![english assistant](docs/english.png) | ![settings](docs/settings.png) |
+
 TypeLingo hooks into an open-source Chinese input method so that every sentence
 you commit is translated to natural English in a floating panel, right where you
 type — in **any app, including Microsoft Office**. It doubles as an English
