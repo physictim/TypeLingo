@@ -5,9 +5,11 @@
 
 > 繁體中文說明：[README.zh-Hant.md](README.zh-Hant.md)
 
-| Live translation | English assistant | Settings |
-|---|---|---|
-| ![live translation](docs/panel.png) | ![english assistant](docs/english.png) | ![settings](docs/settings.png) |
+| Live translation | English writing assistant |
+|---|---|
+| ![live translation](docs/panel.png) | ![english assistant](docs/english.png) |
+| **Settings** | **Menu-bar toggle & styles** |
+| ![settings](docs/settings.png) | ![menu](docs/menu.png) |
 
 TypeLingo hooks into an open-source Chinese input method so that every sentence
 you commit is translated to natural English in a floating panel, right where you
