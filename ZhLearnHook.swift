@@ -329,11 +329,14 @@ private enum CostTracker {
 }
 
 private enum ZhLearnTranslator {
+  private static var current: Task<Void, Never>?
+
   static func translate(
     _ text: String, englishMode: Bool, precise: Bool, domain: String, history: [String],
     onChunk: @escaping (String) -> Void,
     onDone: @escaping (String, String, String) -> Void
   ) {
+    current?.cancel()  // 取消前一個還在跑的請求（清掉地端 LLM 佇列，避免最新的排隊等很久）
     let cfg = ZhLearnConfig.load()
     if !cfg.isLocal, cfg.apiKey.isEmpty {
       onDone("（雲端服務需 API Key：按右下 ⚙ 設定）", "", "")
@@ -407,7 +410,7 @@ private enum ZhLearnTranslator {
 
     let model = cfg.model
     let isLocal = cfg.isLocal
-    Task {
+    current = Task {
       do {
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)
         if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -419,6 +422,7 @@ private enum ZhLearnTranslator {
         var ct = 0
         var lastSent = ""
         for try await line in bytes.lines {
+          if Task.isCancelled { return }
           let l = line.trimmingCharacters(in: .whitespaces)
           guard l.hasPrefix("data:") else { continue }
           let payload = String(l.dropFirst(5)).trimmingCharacters(in: .whitespaces)
@@ -444,6 +448,7 @@ private enum ZhLearnTranslator {
             }
           }
         }
+        if Task.isCancelled { return }
         let parts = acc.components(separatedBy: "###")
         let main = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? acc
         let notes = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
@@ -453,6 +458,7 @@ private enum ZhLearnTranslator {
         }
         onDone(main.isEmpty ? "（無回應）" : main, notes, cost)
       } catch {
+        if Task.isCancelled || (error as? URLError)?.code == .cancelled { return }
         onDone("網路錯誤：\(error.localizedDescription)", "", "")
       }
     }
