@@ -54,10 +54,31 @@ writing assistant and a "select-anything-to-translate" tool.
 | Select / paste translate | macOS Accessibility (`AXSelectedText`) + Carbon global hotkey |
 | Display | native `NSVisualEffectView` panel (works on all Spaces, no throttling) |
 
-## 🚀 Quick start
+## 📥 Download (prebuilt)
+
+Grab the latest signed & notarized `TypeLingo.app` from
+[**Releases**](https://github.com/physictim/TypeLingo/releases) — no building
+required.
+
+1. Unzip and move it into your input methods folder:
+   ```bash
+   cp -R TypeLingo.app ~/Library/Input\ Methods/
+   ```
+2. **System Settings → Keyboard → Input Sources → ＋ → Chinese, Traditional →
+   TypeLingo → Add.**
+3. Switch to TypeLingo, type Chinese → English streams into the panel.
+4. Set your API key via the panel's ⚙ (or `~/.zhlearnime/config.json`).
+5. For "select to translate" (⌥⌘T), grant **Accessibility** in System Settings →
+   Privacy & Security.
+
+> Requires macOS 13+. The release is de-sandboxed (so the Accessibility feature
+> works) and Apple-notarized.
+
+## 🚀 Build from source
 
 You need a vChewing fork to host the hook. Full steps in
-**[INTEGRATION.md](INTEGRATION.md)**:
+**[INTEGRATION.md](INTEGRATION.md)** (and [REBRAND.md](REBRAND.md) to ship it
+under your own name):
 
 1. Copy `ZhLearnHook.swift` into the vChewing assembly package.
 2. Add four small hook points (menu, activate, commit, English capture) + an ATS

@@ -20,10 +20,17 @@ SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Your Name (TEAMID)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-your-notary-profile}"
 # --------------------
 
-APP="$VCHEWING_DIR/Build/Products/Release/vChewing.app"
+BUILT="$VCHEWING_DIR/Build/Products/Release/vChewing.app"
+APP="$VCHEWING_DIR/Build/Products/Release/TypeLingo.app"
 
 echo "▶ Building (make release)…"
 ( cd "$VCHEWING_DIR" && make release )
+
+# make release always emits the file name vChewing.app; the bundle identity
+# (id / name / icon) is already rebranded inside, so just give it the right name.
+echo "▶ Renaming to TypeLingo.app…"
+rm -rf "$APP"
+cp -R "$BUILT" "$APP"
 
 echo "▶ Writing no-sandbox entitlements…"
 ENT=/tmp/typelingo_nosandbox.plist
@@ -53,6 +60,6 @@ xcrun stapler validate "$APP"
 
 echo ""
 echo "✅ Done. Install with:"
-echo "   rm -rf ~/Library/Input\\ Methods/vChewing.app"
+echo "   rm -rf ~/Library/Input\\ Methods/TypeLingo.app"
 echo "   cp -R \"$APP\" ~/Library/Input\\ Methods/"
-echo "   pkill vChewing   # reload"
+echo "   killall vChewing 2>/dev/null   # reload (the executable inside is named vChewing)"
