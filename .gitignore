@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Secrets / local config — never commit your API keys
+config.json
+.zhlearnime/
+
+# Build artifacts (if you check out a vChewing fork alongside)
+Build/
+.build/
+*.app
+*.zip

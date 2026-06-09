@@ -1,0 +1,30 @@
+{
+  "provider": "openai",
+  "profiles": {
+    "openai": {
+      "apiKey": "sk-your-openai-key-here",
+      "model": "gpt-4o-mini",
+      "baseUrl": ""
+    },
+    "ollama": {
+      "apiKey": "",
+      "model": "qwen2.5",
+      "baseUrl": ""
+    },
+    "lmstudio": {
+      "apiKey": "",
+      "model": "your-loaded-model-name",
+      "baseUrl": ""
+    }
+  },
+  "style": "business",
+  "resetSec": 2,
+  "preciseMode": false,
+  "domain": "",
+  "englishAssist": true,
+  "liveEnabled": true,
+  "opacity": 0.96,
+  "hotkeyKeyCode": 17,
+  "hotkeyMods": 2304,
+  "hotkeyLabel": "⌥⌘T"
+}
