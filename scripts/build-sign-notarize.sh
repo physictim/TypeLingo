@@ -32,6 +32,25 @@ echo "▶ Renaming to TypeLingo.app…"
 rm -rf "$APP"
 cp -R "$BUILT" "$APP"
 
+# Optional: bundle the sherpa-onnx engine so the "high-quality local (Piper)"
+# 🔊 option works. The voice model is auto-downloaded by the app on first use;
+# here we only embed the (Apache-2.0) inference binary, signed with your ID.
+# Set SKIP_TTS=1 to skip.
+if [ "${SKIP_TTS:-0}" != "1" ]; then
+  SHERPA_VER="${SHERPA_VER:-v1.13.2}"
+  echo "▶ Embedding sherpa-onnx TTS engine ($SHERPA_VER)…"
+  TMP=$(mktemp -d)
+  curl -sL -o "$TMP/s.tar.bz2" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/$SHERPA_VER/sherpa-onnx-$SHERPA_VER-osx-universal2-static.tar.bz2"
+  tar xjf "$TMP/s.tar.bz2" -C "$TMP"
+  mkdir -p "$APP/Contents/Helpers"
+  cp "$TMP/sherpa-onnx-$SHERPA_VER-osx-universal2-static/bin/sherpa-onnx-offline-tts" \
+    "$APP/Contents/Helpers/sherpa-onnx-offline-tts"
+  codesign --force --options runtime --timestamp \
+    --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/sherpa-onnx-offline-tts"
+  rm -rf "$TMP"
+fi
+
 echo "▶ Writing no-sandbox entitlements…"
 ENT=/tmp/typelingo_nosandbox.plist
 cat > "$ENT" <<'EOF'
