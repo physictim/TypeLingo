@@ -491,8 +491,10 @@ private enum ZhLearnTranslator {
 /// 扁平按鈕：平時細框線無底色；選中(on)時填底色。
 private final class FlatButton: NSButton {
   private let labelText: String
-  init(_ text: String, toggle: Bool) {
+  private let glyphSize: CGFloat
+  init(_ text: String, toggle: Bool, glyphSize: CGFloat = 11) {
     labelText = text
+    self.glyphSize = glyphSize
     super.init(frame: .zero)
     isBordered = false
     wantsLayer = true
@@ -516,7 +518,7 @@ private final class FlatButton: NSButton {
     layer?.borderColor = on ? NSColor.clear.cgColor : NSColor(white: 1, alpha: 0.28).cgColor
     let c: NSColor = on ? .white : NSColor(white: 1, alpha: 0.78)
     attributedTitle = NSAttributedString(
-      string: labelText, attributes: [.foregroundColor: c, .font: NSFont.systemFont(ofSize: 11)])
+      string: labelText, attributes: [.foregroundColor: c, .font: NSFont.systemFont(ofSize: glyphSize)])
   }
 }
 
@@ -578,7 +580,15 @@ private final class ResizeGrip: NSView {
 @MainActor
 private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
   static let shared = ZhLearnTTS()
-  private let synth = AVSpeechSynthesizer()
+  // 惰性建立：翻譯顯示路徑（show→stop）不會碰到語音引擎，避免在輸入法行程裡同步初始化 AV 而卡住浮窗。
+  private var synthOpt: AVSpeechSynthesizer?
+  private func synth() -> AVSpeechSynthesizer {
+    if let s = synthOpt { return s }
+    let s = AVSpeechSynthesizer()
+    s.delegate = self
+    synthOpt = s
+    return s
+  }
   private var player: AVAudioPlayer?
   private var task: URLSessionDataTask?
   private var dlTask: URLSessionDownloadTask?
@@ -590,13 +600,9 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
   /// 狀態文字回呼（下載進度等；空字串＝清除）。
   var onStatus: ((String) -> Void)?
 
-  override init() {
-    super.init()
-    synth.delegate = self
-  }
-
   private var busy: Bool {
-    synth.isSpeaking || (player?.isPlaying ?? false) || task != nil || dlTask != nil || proc != nil
+    (synthOpt?.isSpeaking ?? false) || (player?.isPlaying ?? false) || task != nil || dlTask != nil
+      || proc != nil
       || downloading
   }
 
@@ -657,7 +663,7 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
       max(Double(AVSpeechUtteranceMinimumSpeechRate),
         min(Double(AVSpeechUtteranceMaximumSpeechRate), base * speed)))
     onStateChange?(true)
-    synth.speak(u)
+    synth().speak(u)
   }
 
   // MARK: 內建 Piper（sherpa-onnx）
@@ -822,7 +828,7 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     downloading = false
     proc?.terminate()
     proc = nil
-    if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+    if synthOpt?.isSpeaking == true { synthOpt?.stopSpeaking(at: .immediate) }
     if let p = player, p.isPlaying { p.stop() }
     player = nil
     onStatus?("")
@@ -899,7 +905,7 @@ private final class ZhLearnPanel: NSObject {
     trans.font = NSFont.systemFont(ofSize: 16, weight: .medium)
     trans.isSelectable = true
     // 朗讀喇叭：併入底部控制列（見下方 btnStack），不另佔一行。
-    let speaker = FlatButton("🔊", toggle: false)
+    let speaker = FlatButton("🔊", toggle: false, glyphSize: 13)
     speaker.target = self
     speaker.action = #selector(speakerTapped)
     // 分隔線
@@ -917,7 +923,7 @@ private final class ZhLearnPanel: NSObject {
     let cost = makeLabel(9.5, NSColor(white: 1, alpha: 0.4))
     cost.maximumNumberOfLines = 1
 
-    let closeBtn = FlatButton("✕", toggle: false)
+    let closeBtn = FlatButton("✕", toggle: false, glyphSize: 14)
     closeBtn.target = self
     closeBtn.action = #selector(closeTapped)
 
@@ -934,7 +940,7 @@ private final class ZhLearnPanel: NSObject {
       btnStack.addArrangedSubview(b)
       styleButtons.append(b)
     }
-    let gearBtn = FlatButton("⚙", toggle: false)
+    let gearBtn = FlatButton("⚙", toggle: false, glyphSize: 15)
     gearBtn.target = self
     gearBtn.action = #selector(settingsTapped)
     btnStack.addArrangedSubview(gearBtn)

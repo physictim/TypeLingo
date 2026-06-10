@@ -51,6 +51,16 @@ if [ "${SKIP_TTS:-0}" != "1" ]; then
   rm -rf "$TMP"
 fi
 
+# `make release` converts the menu-bar icons to .tiff, but the Info.plist still
+# references "MenuIcon-*.png" (vChewing's original keys). With only the .tiff
+# present, macOS can't resolve the icon and falls back to the TISIconLabels text.
+# Ship the exact-named PNGs too so the input-source icon actually shows.
+ICONSRC="$VCHEWING_DIR/Sources/vChewingIME_macOS/Resources/MenuIcons"
+if [ -d "$ICONSRC" ]; then
+  echo "▶ Adding menu-icon PNGs (so the input-source icon resolves)…"
+  cp "$ICONSRC"/MenuIcon-*CVIM*.png "$APP/Contents/Resources/" 2>/dev/null || true
+fi
+
 echo "▶ Writing no-sandbox entitlements…"
 ENT=/tmp/typelingo_nosandbox.plist
 cat > "$ENT" <<'EOF'
