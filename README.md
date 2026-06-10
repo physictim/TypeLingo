@@ -107,8 +107,7 @@ zero setup). For a more natural neural voice, set the ⚙ "TTS engine" to
 **high-quality local (Piper)** — the neural engine
 ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), Apache-2.0) is **bundled in
 the app**; the first 🔊 auto-downloads the voice model
-([Piper](https://github.com/rhasspy/piper) `en_US-amy-medium`, ~64MB, cached
-after). Fully offline, on-device, **no server to run yourself**.
+([Piper](https://github.com/rhasspy/piper) voice, ~64MB, cachedafter). Fully offline, on-device, **no server to run yourself**.
 
 > Advanced: you can instead pick "custom OpenAI-compatible endpoint" to use any
 > TTS server (e.g. a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI)
