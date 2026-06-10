@@ -2,7 +2,7 @@
 // 浮窗：半透明、可拖曳、可改大小、扁平風格按鈕、⚙設定(右下)、✕關閉(右上)、token/花費(左下)、譯文垂直置中靠左。
 import AppKit
 import ApplicationServices
-import AVFoundation
+@preconcurrency import AVFoundation
 import Carbon
 import Foundation
 
@@ -215,6 +215,20 @@ private struct ZhLearnConfig {
   var hotkeyKeyCode = 17  // T
   var hotkeyMods = cmdKey | optionKey  // ⌘⌥
   var hotkeyLabel = "⌥⌘T"
+  // 朗讀引擎：apple＝系統內建（離線零設定）；endpoint＝OpenAI 相容 TTS（如本機 Kokoro-FastAPI）。
+  var ttsEngine = "apple"
+  var ttsEndpoint = "http://localhost:8880/v1/audio/speech"
+  var ttsVoice = "af_heart"
+  var ttsApiKey = ""  // 雲端 TTS 才需要；本機 Kokoro 留空
+  /// 自動補正 TTS 端點路徑（填基底 / .../v1 / 完整路徑都接成 .../v1/audio/speech）。
+  var ttsURL: String {
+    var u = ttsEndpoint.trimmingCharacters(in: .whitespaces)
+    while u.hasSuffix("/") { u.removeLast() }
+    if u.isEmpty { return "http://localhost:8880/v1/audio/speech" }
+    if u.hasSuffix("/audio/speech") { return u }
+    if u.hasSuffix("/v1") { return u + "/audio/speech" }
+    return u + "/v1/audio/speech"
+  }
   var endpoint: String {
     if !baseURL.isEmpty {
       // 自動補正路徑：不論填基底 / .../v1 / 完整路徑，都接成正確的 chat completions 端點
@@ -263,6 +277,10 @@ private struct ZhLearnConfig {
     c.hotkeyKeyCode = (obj["hotkeyKeyCode"] as? NSNumber)?.intValue ?? c.hotkeyKeyCode
     c.hotkeyMods = (obj["hotkeyMods"] as? NSNumber)?.intValue ?? c.hotkeyMods
     c.hotkeyLabel = obj["hotkeyLabel"] as? String ?? c.hotkeyLabel
+    c.ttsEngine = obj["ttsEngine"] as? String ?? c.ttsEngine
+    if let v = obj["ttsEndpoint"] as? String, !v.isEmpty { c.ttsEndpoint = v }
+    if let v = obj["ttsVoice"] as? String, !v.isEmpty { c.ttsVoice = v }
+    c.ttsApiKey = obj["ttsApiKey"] as? String ?? c.ttsApiKey
     return c
   }
   static func rawProfiles() -> [String: [String: String]] {
@@ -549,12 +567,15 @@ private final class ResizeGrip: NSView {
   }
 }
 
-/// 朗讀整句英文。優先採用系統最自然的英文語音（premium > enhanced），
-/// 全離線、零成本、零延遲；使用者可在「系統設定 → 輔助使用 → 朗讀內容 →
-/// 系統語音 → 管理語音」下載 Premium 英文語音以獲得最自然的音色。
-private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate {
+/// 朗讀整句英文。兩種引擎：
+/// 1) apple    — 系統內建 AVSpeechSynthesizer，離線零設定（可下載 Premium 語音更自然）。
+/// 2) endpoint — OpenAI 相容 TTS 端點（如本機 Kokoro-FastAPI），音色最自然；連不上自動退回 apple。
+@MainActor
+private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
   static let shared = ZhLearnTTS()
   private let synth = AVSpeechSynthesizer()
+  private var player: AVAudioPlayer?
+  private var task: URLSessionDataTask?
   /// 播放狀態變化回呼（true＝播放中，false＝停止／結束）。
   var onStateChange: ((Bool) -> Void)?
 
@@ -562,6 +583,8 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate {
     super.init()
     synth.delegate = self
   }
+
+  private var busy: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || task != nil }
 
   /// 挑選最自然的英文語音：偏好 en-US，再依音質（premium/enhanced/default）排序。
   private static let voice: AVSpeechSynthesisVoice? = {
@@ -574,29 +597,86 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate {
 
   /// 按一下：未播放→朗讀；播放中→停止。
   func toggle(_ text: String) {
-    if synth.isSpeaking {
+    if busy {
       stop()
       return
     }
     let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { return }
+    let cfg = ZhLearnConfig.load()
+    if cfg.ttsEngine == "endpoint" {
+      speakEndpoint(t, cfg: cfg)
+    } else {
+      speakApple(t)
+    }
+  }
+
+  private func speakApple(_ t: String) {
     let u = AVSpeechUtterance(string: t)
     u.voice = Self.voice
-    // 採用語音的預設語速（AVSpeechUtterance 預設即 AVSpeechUtteranceDefaultSpeechRate）。
     onStateChange?(true)
     synth.speak(u)
   }
 
+  /// 走 OpenAI 相容 /v1/audio/speech：POST {model,input,voice,response_format:wav} → 播放 wav。
+  private func speakEndpoint(_ t: String, cfg: ZhLearnConfig) {
+    guard let url = URL(string: cfg.ttsURL) else {
+      speakApple(t)
+      return
+    }
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.timeoutInterval = 30
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    if !cfg.ttsApiKey.isEmpty {
+      req.setValue("Bearer \(cfg.ttsApiKey)", forHTTPHeaderField: "Authorization")
+    }
+    let body: [String: Any] = [
+      "model": "kokoro", "input": t, "voice": cfg.ttsVoice, "response_format": "wav",
+    ]
+    req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    onStateChange?(true)
+    let dataTask = URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+      // 只捕捉 Sendable 值（status/data/t）再跳回 MainActor 觸碰 self。
+      let status = (resp as? HTTPURLResponse)?.statusCode
+      Task { @MainActor in
+        guard let self else { return }
+        self.task = nil
+        guard status == 200, let data, let p = try? AVAudioPlayer(data: data) else {
+          // 端點連不上／回應異常：自動退回系統語音，確保按下去一定有聲音。
+          self.speakApple(t)
+          return
+        }
+        p.delegate = self
+        self.player = p
+        p.play()
+      }
+    }
+    self.task = dataTask
+    dataTask.resume()
+  }
+
   func stop() {
+    task?.cancel()
+    task = nil
     if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+    if let p = player, p.isPlaying { p.stop() }
+    player = nil
     onStateChange?(false)
   }
 
-  func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
-    onStateChange?(false)
+  // 系統在主執行緒回呼這些 delegate；標 nonisolated 以滿足協定，內部跳回 MainActor。
+  nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
+    Task { @MainActor in self.onStateChange?(false) }
   }
-  func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
-    onStateChange?(false)
+  nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
+    Task { @MainActor in self.onStateChange?(false) }
+  }
+  nonisolated func audioPlayerDidFinishPlaying(_: AVAudioPlayer, successfully _: Bool) {
+    Task { @MainActor in
+      self.player = nil
+      self.onStateChange?(false)
+    }
   }
 }
 
@@ -875,6 +955,11 @@ private final class ZhLearnSettings: NSObject {
   private let preciseCheck = NSButton(
     checkboxWithTitle: "精準翻譯（理解整句＋前文，較吃 token）", target: nil, action: nil)
   private let domainField = NSTextField()
+  private let ttsKokoroCheck = NSButton(
+    checkboxWithTitle: "高品質朗讀：用 OpenAI 相容 TTS 端點（如本機 Kokoro-FastAPI）", target: nil,
+    action: nil)
+  private let ttsEndpointField = NSTextField()
+  private let ttsVoiceField = NSTextField()
   private let opacitySlider = NSSlider(
     value: 0.96, minValue: 0.3, maxValue: 1.0, target: nil, action: nil)
   private let shortcutRecorder = ShortcutRecorder()
@@ -924,6 +1009,9 @@ private final class ZhLearnSettings: NSObject {
     liveCheck.state = c.liveEnabled ? .on : .off
     preciseCheck.state = c.preciseMode ? .on : .off
     domainField.stringValue = c.domain
+    ttsKokoroCheck.state = (c.ttsEngine == "endpoint") ? .on : .off
+    ttsEndpointField.stringValue = c.ttsEndpoint
+    ttsVoiceField.stringValue = c.ttsVoice
     opacitySlider.doubleValue = c.opacity
     shortcutRecorder.set(keyCode: c.hotkeyKeyCode, mods: c.hotkeyMods, label: c.hotkeyLabel)
     NSApp.activate(ignoringOtherApps: true)
@@ -947,10 +1035,11 @@ private final class ZhLearnSettings: NSObject {
     providerPopup.translatesAutoresizingMaskIntoConstraints = false
     providerPopup.target = self
     providerPopup.action = #selector(providerChanged)
-    for f in [apiKeyField, modelField, baseURLField, resetField, domainField] {
+    for f in [apiKeyField, modelField, baseURLField, resetField, domainField, ttsEndpointField, ttsVoiceField] {
       f.translatesAutoresizingMaskIntoConstraints = false
       f.widthAnchor.constraint(equalToConstant: 500).isActive = true
     }
+    ttsKokoroCheck.translatesAutoresizingMaskIntoConstraints = false
     preciseCheck.translatesAutoresizingMaskIntoConstraints = false
     englishAssistCheck.translatesAutoresizingMaskIntoConstraints = false
     liveCheck.translatesAutoresizingMaskIntoConstraints = false
@@ -971,6 +1060,9 @@ private final class ZhLearnSettings: NSObject {
       englishAssistCheck,
       preciseCheck,
       labeled("用字領域 Domain（如 醫學/法律/軟體；選填）", domainField),
+      ttsKokoroCheck,
+      labeled("TTS 端點（選填，預設 http://localhost:8880）", ttsEndpointField),
+      labeled("TTS 語音 Voice（Kokoro 預設 af_heart）", ttsVoiceField),
     ])
     form.orientation = .vertical
     form.alignment = .leading
@@ -988,9 +1080,9 @@ private final class ZhLearnSettings: NSObject {
     resetCostBtn.translatesAutoresizingMaskIntoConstraints = false
 
     let w = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 540, height: 584),
+      contentRect: NSRect(x: 0, y: 0, width: 540, height: 772),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    w.title = "中文學英文 — 設定"
+    w.title = "打即通 — 設定"
     w.isReleasedWhenClosed = false
     let cv = w.contentView!
     cv.addSubview(form)
@@ -1024,6 +1116,9 @@ private final class ZhLearnSettings: NSObject {
       "liveEnabled": liveCheck.state == .on,
       "preciseMode": preciseCheck.state == .on,
       "domain": domainField.stringValue.trimmingCharacters(in: .whitespaces),
+      "ttsEngine": ttsKokoroCheck.state == .on ? "endpoint" : "apple",
+      "ttsEndpoint": ttsEndpointField.stringValue.trimmingCharacters(in: .whitespaces),
+      "ttsVoice": ttsVoiceField.stringValue.trimmingCharacters(in: .whitespaces),
       "opacity": opacitySlider.doubleValue,
       "hotkeyKeyCode": shortcutRecorder.keyCode,
       "hotkeyMods": shortcutRecorder.carbonModifiers,
