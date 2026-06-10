@@ -29,6 +29,7 @@ writing assistant and a "select-anything-to-translate" tool.
   inline, in any app (Office included), rendered by a native `NSPanel` (no webview
   throttling).
 - **Learning note** — each translation comes with a short Traditional-Chinese note
+- **Speak it** — a 🔊 at the end of the translation reads the whole English sentence aloud (tap again to stop), using the most natural English voice available (offline, free).
   explaining a key word choice / tone / grammar point.
 - **English writing assistant** — type *English* and it rewrites it idiomatically,
   shows the Chinese meaning, and lists typo / grammar / usage suggestions.

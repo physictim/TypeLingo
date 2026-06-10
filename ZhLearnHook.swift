@@ -2,6 +2,7 @@
 // 浮窗：半透明、可拖曳、可改大小、扁平風格按鈕、⚙設定(右下)、✕關閉(右上)、token/花費(左下)、譯文垂直置中靠左。
 import AppKit
 import ApplicationServices
+import AVFoundation
 import Carbon
 import Foundation
 
@@ -548,6 +549,57 @@ private final class ResizeGrip: NSView {
   }
 }
 
+/// 朗讀整句英文。優先採用系統最自然的英文語音（premium > enhanced），
+/// 全離線、零成本、零延遲；使用者可在「系統設定 → 輔助使用 → 朗讀內容 →
+/// 系統語音 → 管理語音」下載 Premium 英文語音以獲得最自然的音色。
+private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate {
+  static let shared = ZhLearnTTS()
+  private let synth = AVSpeechSynthesizer()
+  /// 播放狀態變化回呼（true＝播放中，false＝停止／結束）。
+  var onStateChange: ((Bool) -> Void)?
+
+  override init() {
+    super.init()
+    synth.delegate = self
+  }
+
+  /// 挑選最自然的英文語音：偏好 en-US，再依音質（premium/enhanced/default）排序。
+  private static let voice: AVSpeechSynthesisVoice? = {
+    let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
+    func score(_ v: AVSpeechSynthesisVoice) -> Int {
+      (v.language == "en-US" ? 100 : 50) + v.quality.rawValue * 10
+    }
+    return voices.sorted { score($0) > score($1) }.first
+  }()
+
+  /// 按一下：未播放→朗讀；播放中→停止。
+  func toggle(_ text: String) {
+    if synth.isSpeaking {
+      stop()
+      return
+    }
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !t.isEmpty else { return }
+    let u = AVSpeechUtterance(string: t)
+    u.voice = Self.voice
+    // 採用語音的預設語速（AVSpeechUtterance 預設即 AVSpeechUtteranceDefaultSpeechRate）。
+    onStateChange?(true)
+    synth.speak(u)
+  }
+
+  func stop() {
+    if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+    onStateChange?(false)
+  }
+
+  func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
+    onStateChange?(false)
+  }
+  func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
+    onStateChange?(false)
+  }
+}
+
 private final class ZhLearnPanel: NSObject {
   static let shared = ZhLearnPanel()
   private var panel: NSPanel?
@@ -555,6 +607,8 @@ private final class ZhLearnPanel: NSObject {
   private var notesLabel: NSTextField?
   private var costLabel: NSTextField?
   private var dividerView: NSBox?
+  private var speakerBtn: FlatButton?
+  private var currentEnglish = ""
   private var styleButtons: [FlatButton] = []
   private var positioned = false
   private let styles = [("business", "商業"), ("scientific", "科學"), ("casual", "輕鬆")]
@@ -600,13 +654,25 @@ private final class ZhLearnPanel: NSObject {
     let trans = makeLabel(16, .white)
     trans.font = NSFont.systemFont(ofSize: 16, weight: .medium)
     trans.isSelectable = true
+    // 句末喇叭：朗讀整句英文（再按一次停止）。靠右對齊放在譯文結尾。
+    let speaker = FlatButton("🔊", toggle: false)
+    speaker.target = self
+    speaker.action = #selector(speakerTapped)
+    let speakerSpacer = NSView()
+    speakerSpacer.translatesAutoresizingMaskIntoConstraints = false
+    speakerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    speakerSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    let speakerRow = NSStackView(views: [speakerSpacer, speaker])
+    speakerRow.orientation = .horizontal
+    speakerRow.spacing = 0
+    speakerRow.translatesAutoresizingMaskIntoConstraints = false
     // 分隔線
     let divider = NSBox()
     divider.boxType = .separator
     divider.translatesAutoresizingMaskIntoConstraints = false
     // 說明 / 建議（次級、行距較鬆）
     let notes = makeLabel(12, NSColor(white: 1, alpha: 0.66))
-    let textStack = NSStackView(views: [trans, divider, notes])
+    let textStack = NSStackView(views: [trans, speakerRow, divider, notes])
     textStack.orientation = .vertical
     textStack.alignment = .leading
     textStack.spacing = 7
@@ -675,6 +741,7 @@ private final class ZhLearnPanel: NSObject {
       textStack.topAnchor.constraint(greaterThanOrEqualTo: region.topAnchor, constant: 2),
 
       divider.widthAnchor.constraint(equalTo: textStack.widthAnchor),
+      speakerRow.widthAnchor.constraint(equalTo: textStack.widthAnchor),
     ])
 
     self.panel = p
@@ -682,6 +749,11 @@ private final class ZhLearnPanel: NSObject {
     self.notesLabel = notes
     self.costLabel = cost
     self.dividerView = divider
+    self.speakerBtn = speaker
+    // 播放狀態驅動喇叭高亮（播放中＝accent 高亮，結束自動還原）。
+    ZhLearnTTS.shared.onStateChange = { [weak self] playing in
+      DispatchQueue.main.async { self?.speakerBtn?.state = playing ? .on : .off }
+    }
     refreshButtons()
   }
 
@@ -692,14 +764,25 @@ private final class ZhLearnPanel: NSObject {
   }
   @objc private func closeTapped() {
     ZhLearnHook.userClosed = true
+    ZhLearnTTS.shared.stop()
     panel?.orderOut(nil)
   }
 
-  func hide() { panel?.orderOut(nil) }
+  /// 按喇叭：朗讀整句英文；播放中再按一次即停止。非英文（如「翻譯中…」）忽略。
+  @objc private func speakerTapped() {
+    guard currentEnglish.contains(where: { $0.isLetter && $0.isASCII }) else { return }
+    ZhLearnTTS.shared.toggle(currentEnglish)
+  }
+
+  func hide() {
+    ZhLearnTTS.shared.stop()
+    panel?.orderOut(nil)
+  }
 
   /// 串流中的輕量更新：只換主譯文文字（不重定位、不重讀設定，避免卡頓）。
   func streamUpdate(_ text: String) {
     ensure()
+    currentEnglish = text
     transLabel?.stringValue = text
     notesLabel?.isHidden = true
     dividerView?.isHidden = true
@@ -729,6 +812,8 @@ private final class ZhLearnPanel: NSObject {
 
   func show(_ text: String, notes: String, cost: String, at caret: NSPoint) {
     ensure()
+    ZhLearnTTS.shared.stop()  // 新內容到達：停掉上一句的朗讀
+    currentEnglish = text
     transLabel?.stringValue = text
     let hasNotes = !notes.isEmpty
     notesLabel?.isHidden = !hasNotes
