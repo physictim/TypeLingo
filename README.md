@@ -29,8 +29,8 @@ writing assistant and a "select-anything-to-translate" tool.
   inline, in any app (Office included), rendered by a native `NSPanel` (no webview
   throttling).
 - **Learning note** — each translation comes with a short Traditional-Chinese note
-- **Speak it** — a 🔊 at the end of the translation reads the whole sentence aloud (tap to stop). System voice by default (offline); ⚙ can switch to **high-quality local (bundled Piper neural voice, ~64MB auto-downloaded on first use)** or a custom OpenAI-compatible endpoint.
   explaining a key word choice / tone / grammar point.
+- **Speak it** — a 🔊 at the end of the translation reads the whole sentence aloud (tap to stop). System voice by default (offline); ⚙ can switch to **high-quality local (bundled Piper neural voice, ~64MB auto-downloaded on first use)** or a custom OpenAI-compatible endpoint.
 - **English writing assistant** — type *English* and it rewrites it idiomatically,
   shows the Chinese meaning, and lists typo / grammar / usage suggestions.
 - **Select to translate** — select text anywhere and press a hotkey (default
