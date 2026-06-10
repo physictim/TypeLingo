@@ -42,6 +42,29 @@ In `Plugins/BundleApps/plugin.swift`, the main-app substitution map:
 - (Optional) remove the `UpdateInfo*` keys so it doesn't check vChewing's update
   feed.
 
+### ⚠️ Also rebrand the localized `.strings` (easy to miss)
+
+The bundle-id sweep in step 1 only touches `*.swift` / `*.plist`. The
+**input-source display name** and the menu labels come from
+`Sources/vChewingIME_macOS/Resources/*.lproj/{InfoPlist,Localizable}.strings`.
+If you skip these, macOS shows the **raw bundle id** as the name (because the
+localized name is keyed by the *old* id) and the menu still reads the old brand.
+
+In every `*.lproj/InfoPlist.strings`:
+- Re-key the two input-mode lines to your new bundle id and give them your name:
+  `"com.yourname.inputmethod.yourapp.IMECHT" = "YourApp-CHT";` (and `.IMECHS`).
+- `CFBundleName` / `CFBundleDisplayName` → your app name (this is also the dimmed
+  section header macOS draws above the IME menu).
+
+In every `*.lproj/Localizable.strings`, debrand the menu strings:
+`i18n:Common.VChewing`, `i18n:Menu.vChewingSettings`,
+`i18n:Menu.EditVChewingUserPhrases`, `i18n:Menu.AboutVChewing`,
+`i18n:Menu.UninstallVChewing`.
+
+> The menu-bar 2-char badge is `TISIconLabels → Primary` (step 3). macOS caches
+> input-source labels/names aggressively — after reinstalling, **log out/in** to
+> force a re-scan, or the old badge/name may linger.
+
 ## 4. App icon — `Sources/vChewingIME_macOS/Resources/Images.xcassets/AppIcon.appiconset`
 
 Regenerate the PNGs from your own 1024×1024 icon:
