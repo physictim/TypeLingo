@@ -567,24 +567,34 @@ private final class ResizeGrip: NSView {
   }
 }
 
-/// 朗讀整句英文。兩種引擎：
+/// 朗讀整句英文。三種引擎：
 /// 1) apple    — 系統內建 AVSpeechSynthesizer，離線零設定（可下載 Premium 語音更自然）。
-/// 2) endpoint — OpenAI 相容 TTS 端點（如本機 Kokoro-FastAPI），音色最自然；連不上自動退回 apple。
+/// 2) piper    — 內建 sherpa-onnx + Piper 神經語音：勾選即用，首次自動下載語音模型，全離線本機。
+/// 3) endpoint — OpenAI 相容 TTS 端點（如本機 Kokoro-FastAPI）；連不上自動退回 apple。
 @MainActor
 private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
   static let shared = ZhLearnTTS()
   private let synth = AVSpeechSynthesizer()
   private var player: AVAudioPlayer?
   private var task: URLSessionDataTask?
+  private var dlTask: URLSessionDownloadTask?
+  private var proc: Process?
+  private var downloading = false
+  private var gen = 0  // 世代票：stop／新請求都會 +1，使在途的背景回呼失效（避免停止後又退回朗讀）
   /// 播放狀態變化回呼（true＝播放中，false＝停止／結束）。
   var onStateChange: ((Bool) -> Void)?
+  /// 狀態文字回呼（下載進度等；空字串＝清除）。
+  var onStatus: ((String) -> Void)?
 
   override init() {
     super.init()
     synth.delegate = self
   }
 
-  private var busy: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || task != nil }
+  private var busy: Bool {
+    synth.isSpeaking || (player?.isPlaying ?? false) || task != nil || dlTask != nil || proc != nil
+      || downloading
+  }
 
   /// 挑選最自然的英文語音：偏好 en-US，再依音質（premium/enhanced/default）排序。
   private static let voice: AVSpeechSynthesisVoice? = {
@@ -595,7 +605,20 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     return voices.sorted { score($0) > score($1) }.first
   }()
 
-  /// 按一下：未播放→朗讀；播放中→停止。
+  // 內建 Piper 引擎與語音模型路徑（純函式，可從背景執行緒安全呼叫）。
+  nonisolated private static var helperPath: String {
+    Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/sherpa-onnx-offline-tts").path
+  }
+  nonisolated private static var ttsDir: String { ("~/.zhlearnime/tts" as NSString).expandingTildeInPath }
+  nonisolated private static var voiceDir: String { ttsDir + "/vits-piper-en_US-amy-medium" }
+  nonisolated private static var voiceOnnx: String { voiceDir + "/en_US-amy-medium.onnx" }
+  nonisolated private static var voiceTokens: String { voiceDir + "/tokens.txt" }
+  nonisolated private static var voiceData: String { voiceDir + "/espeak-ng-data" }
+  nonisolated private static var voiceReady: Bool { FileManager.default.fileExists(atPath: voiceOnnx) }
+  nonisolated private static let voiceURL =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-medium.tar.bz2"
+
+  /// 按一下：未播放→朗讀；播放中／下載中→停止。
   func toggle(_ text: String) {
     if busy {
       stop()
@@ -603,11 +626,12 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     }
     let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { return }
+    gen += 1
     let cfg = ZhLearnConfig.load()
-    if cfg.ttsEngine == "endpoint" {
-      speakEndpoint(t, cfg: cfg)
-    } else {
-      speakApple(t)
+    switch cfg.ttsEngine {
+    case "piper": speakPiper(t)
+    case "endpoint": speakEndpoint(t, cfg: cfg)
+    default: speakApple(t)
     }
   }
 
@@ -616,6 +640,108 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     u.voice = Self.voice
     onStateChange?(true)
     synth.speak(u)
+  }
+
+  // MARK: 內建 Piper（sherpa-onnx）
+
+  private func speakPiper(_ t: String) {
+    guard FileManager.default.isExecutableFile(atPath: Self.helperPath) else {
+      speakApple(t)  // 引擎缺失（舊版安裝）→ 退回系統語音
+      return
+    }
+    if Self.voiceReady {
+      runPiper(t)
+    } else {
+      downloadVoiceThenSpeak(t)
+    }
+  }
+
+  /// 首次啟用：背景下載 Piper 語音模型（~64MB），解壓後合成。
+  private func downloadVoiceThenSpeak(_ t: String) {
+    if downloading { return }
+    downloading = true
+    onStateChange?(true)
+    onStatus?("⏳ 首次啟用高品質朗讀：下載語音中…")
+    try? FileManager.default.createDirectory(atPath: Self.ttsDir, withIntermediateDirectories: true)
+    guard let url = URL(string: Self.voiceURL) else {
+      downloading = false
+      speakApple(t)
+      return
+    }
+    let dir = Self.ttsDir
+    let g = gen
+    let dl = URLSession.shared.downloadTask(with: url) { [weak self] tmp, _, _ in
+      var ok = false
+      if let tmp {
+        let dst = dir + "/voice.tar.bz2"
+        try? FileManager.default.removeItem(atPath: dst)
+        try? FileManager.default.moveItem(at: tmp, to: URL(fileURLWithPath: dst))
+        let tar = Process()
+        tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        tar.arguments = ["xjf", dst, "-C", dir]
+        do {
+          try tar.run()
+          tar.waitUntilExit()
+          ok = tar.terminationStatus == 0
+        } catch { ok = false }
+        try? FileManager.default.removeItem(atPath: dst)
+      }
+      let done = ok && Self.voiceReady
+      Task { @MainActor in
+        guard let self, self.gen == g else { return }
+        self.downloading = false
+        self.dlTask = nil
+        self.onStatus?("")
+        if done {
+          self.runPiper(t)
+        } else {
+          self.speakApple(t)
+          self.onStatus?("語音下載失敗，暫用系統語音")
+        }
+      }
+    }
+    dlTask = dl
+    dl.resume()
+  }
+
+  /// 呼叫內建 sherpa-onnx-offline-tts 合成 wav 後播放（背景執行，避免卡 UI）。
+  private func runPiper(_ t: String) {
+    let out = NSTemporaryDirectory() + "zhlearn_tts.wav"
+    try? FileManager.default.removeItem(atPath: out)
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: Self.helperPath)
+    p.arguments = [
+      "--vits-model=\(Self.voiceOnnx)",
+      "--vits-tokens=\(Self.voiceTokens)",
+      "--vits-data-dir=\(Self.voiceData)",
+      "--num-threads=2",
+      "--output-filename=\(out)",
+      t,
+    ]
+    p.standardOutput = nil
+    p.standardError = nil
+    proc = p
+    onStateChange?(true)
+    let g = gen
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      var ok = false
+      do {
+        try p.run()
+        p.waitUntilExit()
+        ok = p.terminationStatus == 0
+      } catch { ok = false }
+      Task { @MainActor in
+        guard let self, self.gen == g else { return }
+        self.proc = nil
+        guard ok, let pl = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: out)) else {
+          self.speakApple(t)
+          return
+        }
+        pl.delegate = self
+        self.player = pl
+        pl.play()
+      }
+    }
   }
 
   /// 走 OpenAI 相容 /v1/audio/speech：POST {model,input,voice,response_format:wav} → 播放 wav。
@@ -636,11 +762,12 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     ]
     req.httpBody = try? JSONSerialization.data(withJSONObject: body)
     onStateChange?(true)
+    let g = gen
     let dataTask = URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
       // 只捕捉 Sendable 值（status/data/t）再跳回 MainActor 觸碰 self。
       let status = (resp as? HTTPURLResponse)?.statusCode
       Task { @MainActor in
-        guard let self else { return }
+        guard let self, self.gen == g else { return }
         self.task = nil
         guard status == 200, let data, let p = try? AVAudioPlayer(data: data) else {
           // 端點連不上／回應異常：自動退回系統語音，確保按下去一定有聲音。
@@ -657,11 +784,18 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
   }
 
   func stop() {
+    gen += 1  // 讓所有在途回呼失效
     task?.cancel()
     task = nil
+    dlTask?.cancel()
+    dlTask = nil
+    downloading = false
+    proc?.terminate()
+    proc = nil
     if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
     if let p = player, p.isPlaying { p.stop() }
     player = nil
+    onStatus?("")
     onStateChange?(false)
   }
 
@@ -834,6 +968,12 @@ private final class ZhLearnPanel: NSObject {
     ZhLearnTTS.shared.onStateChange = { [weak self] playing in
       DispatchQueue.main.async { self?.speakerBtn?.state = playing ? .on : .off }
     }
+    // 下載/狀態文字暫顯在左下成本列，清空時還原成本摘要。
+    ZhLearnTTS.shared.onStatus = { [weak self] msg in
+      DispatchQueue.main.async {
+        self?.costLabel?.stringValue = msg.isEmpty ? CostTracker.summary() : msg
+      }
+    }
     refreshButtons()
   }
 
@@ -955,9 +1095,13 @@ private final class ZhLearnSettings: NSObject {
   private let preciseCheck = NSButton(
     checkboxWithTitle: "精準翻譯（理解整句＋前文，較吃 token）", target: nil, action: nil)
   private let domainField = NSTextField()
-  private let ttsKokoroCheck = NSButton(
-    checkboxWithTitle: "高品質朗讀：用 OpenAI 相容 TTS 端點（如本機 Kokoro-FastAPI）", target: nil,
-    action: nil)
+  private let ttsEnginePopup = NSPopUpButton()
+  // 顯示名稱 ↔ 設定值
+  private let ttsEngineItems: [(String, String)] = [
+    ("系統語音（離線、零設定）", "apple"),
+    ("高品質本機（Piper，首次自動下載 ~64MB）", "piper"),
+    ("自訂 OpenAI 相容端點（如 Kokoro）", "endpoint"),
+  ]
   private let ttsEndpointField = NSTextField()
   private let ttsVoiceField = NSTextField()
   private let opacitySlider = NSSlider(
@@ -1009,7 +1153,9 @@ private final class ZhLearnSettings: NSObject {
     liveCheck.state = c.liveEnabled ? .on : .off
     preciseCheck.state = c.preciseMode ? .on : .off
     domainField.stringValue = c.domain
-    ttsKokoroCheck.state = (c.ttsEngine == "endpoint") ? .on : .off
+    if let idx = ttsEngineItems.firstIndex(where: { $0.1 == c.ttsEngine }) {
+      ttsEnginePopup.selectItem(at: idx)
+    }
     ttsEndpointField.stringValue = c.ttsEndpoint
     ttsVoiceField.stringValue = c.ttsVoice
     opacitySlider.doubleValue = c.opacity
@@ -1039,7 +1185,8 @@ private final class ZhLearnSettings: NSObject {
       f.translatesAutoresizingMaskIntoConstraints = false
       f.widthAnchor.constraint(equalToConstant: 500).isActive = true
     }
-    ttsKokoroCheck.translatesAutoresizingMaskIntoConstraints = false
+    ttsEnginePopup.addItems(withTitles: ttsEngineItems.map { $0.0 })
+    ttsEnginePopup.translatesAutoresizingMaskIntoConstraints = false
     preciseCheck.translatesAutoresizingMaskIntoConstraints = false
     englishAssistCheck.translatesAutoresizingMaskIntoConstraints = false
     liveCheck.translatesAutoresizingMaskIntoConstraints = false
@@ -1060,9 +1207,9 @@ private final class ZhLearnSettings: NSObject {
       englishAssistCheck,
       preciseCheck,
       labeled("用字領域 Domain（如 醫學/法律/軟體；選填）", domainField),
-      ttsKokoroCheck,
-      labeled("TTS 端點（選填，預設 http://localhost:8880）", ttsEndpointField),
-      labeled("TTS 語音 Voice（Kokoro 預設 af_heart）", ttsVoiceField),
+      labeled("🔊 朗讀引擎 TTS", ttsEnginePopup),
+      labeled("TTS 端點（僅「自訂端點」用，預設 http://localhost:8880）", ttsEndpointField),
+      labeled("TTS 語音 Voice（端點用，如 Kokoro 的 af_heart）", ttsVoiceField),
     ])
     form.orientation = .vertical
     form.alignment = .leading
@@ -1116,7 +1263,7 @@ private final class ZhLearnSettings: NSObject {
       "liveEnabled": liveCheck.state == .on,
       "preciseMode": preciseCheck.state == .on,
       "domain": domainField.stringValue.trimmingCharacters(in: .whitespaces),
-      "ttsEngine": ttsKokoroCheck.state == .on ? "endpoint" : "apple",
+      "ttsEngine": ttsEngineItems[max(0, ttsEnginePopup.indexOfSelectedItem)].1,
       "ttsEndpoint": ttsEndpointField.stringValue.trimmingCharacters(in: .whitespaces),
       "ttsVoice": ttsVoiceField.stringValue.trimmingCharacters(in: .whitespaces),
       "opacity": opacitySlider.doubleValue,

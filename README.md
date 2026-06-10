@@ -29,7 +29,7 @@ writing assistant and a "select-anything-to-translate" tool.
   inline, in any app (Office included), rendered by a native `NSPanel` (no webview
   throttling).
 - **Learning note** — each translation comes with a short Traditional-Chinese note
-- **Speak it** — a 🔊 at the end of the translation reads the whole sentence aloud (tap to stop). Uses the built-in system voice by default (offline, free); for the most natural voice, enable "high-quality TTS" in ⚙ and point it at an OpenAI-compatible endpoint such as a local **Kokoro-FastAPI**.
+- **Speak it** — a 🔊 at the end of the translation reads the whole sentence aloud (tap to stop). System voice by default (offline); ⚙ can switch to **high-quality local (bundled Piper neural voice, ~64MB auto-downloaded on first use)** or a custom OpenAI-compatible endpoint.
   explaining a key word choice / tone / grammar point.
 - **English writing assistant** — type *English* and it rewrites it idiomatically,
   shows the Chinese meaning, and lists typo / grammar / usage suggestions.
@@ -102,20 +102,19 @@ API key / model / Base URL.
 > ⚠️ Don't expose a keyless local LLM to the public internet. Prefer a VPN such
 > as Tailscale over port-forwarding.
 
-**High-quality speech (Kokoro):** by default 🔊 uses the built-in system voice
-(offline, free). For the most natural open-source voice, tick "high-quality TTS"
-in ⚙ and run a local OpenAI-compatible TTS server — recommended:
-[**Kokoro-FastAPI**](https://github.com/remsky/Kokoro-FastAPI) (Kokoro-82M,
-Apache-2.0):
+**High-quality speech:** 🔊 uses the built-in system voice by default (offline,
+zero setup). For a more natural neural voice, set the ⚙ "TTS engine" to
+**high-quality local (Piper)** — the neural engine
+([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), Apache-2.0) is **bundled in
+the app**; the first 🔊 auto-downloads the voice model
+([Piper](https://github.com/rhasspy/piper) `en_US-amy-medium`, ~64MB, cached
+after). Fully offline, on-device, **no server to run yourself**.
 
-```bash
-docker run -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu   # or the -gpu image
-```
-
-Then leave the ⚙ "TTS endpoint" at the default `http://localhost:8880`
-(auto-completed to `/v1/audio/speech`) and set the voice to `af_heart` (others:
-`af_bella` / `am_adam` / `bf_emma`…). Any OpenAI-compatible TTS works (including
-cloud `tts-1`); if the endpoint is unreachable it falls back to the system voice.
+> Advanced: you can instead pick "custom OpenAI-compatible endpoint" to use any
+> TTS server (e.g. a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI)
+> via `docker run -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu`, or cloud
+> `tts-1`); endpoint defaults to `http://localhost:8880`, voice `af_heart`, and it
+> falls back to the system voice if unreachable.
 
 ## ⌨️ Usage
 
