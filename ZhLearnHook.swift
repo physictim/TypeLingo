@@ -220,6 +220,8 @@ private struct ZhLearnConfig {
   var ttsEndpoint = "http://localhost:8880/v1/audio/speech"
   var ttsVoice = "af_heart"
   var ttsApiKey = ""  // 雲端 TTS 才需要；本機 Kokoro 留空
+  var ttsPiperVoice = "en_US-amy-medium"  // 內建 Piper 引擎要用的語音
+  var ttsSpeed = 1.0  // 朗讀語速倍率（1.0＝正常；>1 較快）
   /// 自動補正 TTS 端點路徑（填基底 / .../v1 / 完整路徑都接成 .../v1/audio/speech）。
   var ttsURL: String {
     var u = ttsEndpoint.trimmingCharacters(in: .whitespaces)
@@ -281,6 +283,8 @@ private struct ZhLearnConfig {
     if let v = obj["ttsEndpoint"] as? String, !v.isEmpty { c.ttsEndpoint = v }
     if let v = obj["ttsVoice"] as? String, !v.isEmpty { c.ttsVoice = v }
     c.ttsApiKey = obj["ttsApiKey"] as? String ?? c.ttsApiKey
+    if let v = obj["ttsPiperVoice"] as? String, !v.isEmpty { c.ttsPiperVoice = v }
+    c.ttsSpeed = (obj["ttsSpeed"] as? NSNumber)?.doubleValue ?? c.ttsSpeed
     return c
   }
   static func rawProfiles() -> [String: [String: String]] {
@@ -610,13 +614,21 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/sherpa-onnx-offline-tts").path
   }
   nonisolated private static var ttsDir: String { ("~/.zhlearnime/tts" as NSString).expandingTildeInPath }
-  nonisolated private static var voiceDir: String { ttsDir + "/vits-piper-en_US-amy-medium" }
-  nonisolated private static var voiceOnnx: String { voiceDir + "/en_US-amy-medium.onnx" }
-  nonisolated private static var voiceTokens: String { voiceDir + "/tokens.txt" }
-  nonisolated private static var voiceData: String { voiceDir + "/espeak-ng-data" }
-  nonisolated private static var voiceReady: Bool { FileManager.default.fileExists(atPath: voiceOnnx) }
-  nonisolated private static let voiceURL =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-medium.tar.bz2"
+  // 依 Piper 語音 id（如 en_US-amy-medium）解析路徑；每個語音套件各自含 onnx/tokens/espeak-ng-data。
+  nonisolated private static func voiceDir(_ id: String) -> String { ttsDir + "/vits-piper-\(id)" }
+  nonisolated private static func onnxPath(_ id: String) -> String? {
+    let dir = voiceDir(id)
+    guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir),
+      let onnx = items.first(where: { $0.hasSuffix(".onnx") })
+    else { return nil }
+    return dir + "/" + onnx
+  }
+  nonisolated private static func voiceReady(_ id: String) -> Bool {
+    onnxPath(id) != nil && FileManager.default.fileExists(atPath: voiceDir(id) + "/tokens.txt")
+  }
+  nonisolated private static func voiceURL(_ id: String) -> String {
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-\(id).tar.bz2"
+  }
 
   /// 按一下：未播放→朗讀；播放中／下載中→停止。
   func toggle(_ text: String) {
@@ -629,41 +641,48 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     gen += 1
     let cfg = ZhLearnConfig.load()
     switch cfg.ttsEngine {
-    case "piper": speakPiper(t)
+    case "piper": speakPiper(t, cfg: cfg)
     case "endpoint": speakEndpoint(t, cfg: cfg)
     default: speakApple(t)
     }
   }
 
   private func speakApple(_ t: String) {
+    let speed = ZhLearnConfig.load().ttsSpeed
     let u = AVSpeechUtterance(string: t)
     u.voice = Self.voice
+    // 語速：以系統預設語速為 1.0×，再乘上倍率並夾在合法範圍。
+    let base = Double(AVSpeechUtteranceDefaultSpeechRate)
+    u.rate = Float(
+      max(Double(AVSpeechUtteranceMinimumSpeechRate),
+        min(Double(AVSpeechUtteranceMaximumSpeechRate), base * speed)))
     onStateChange?(true)
     synth.speak(u)
   }
 
   // MARK: 內建 Piper（sherpa-onnx）
 
-  private func speakPiper(_ t: String) {
+  private func speakPiper(_ t: String, cfg: ZhLearnConfig) {
     guard FileManager.default.isExecutableFile(atPath: Self.helperPath) else {
       speakApple(t)  // 引擎缺失（舊版安裝）→ 退回系統語音
       return
     }
-    if Self.voiceReady {
-      runPiper(t)
+    let id = cfg.ttsPiperVoice
+    if Self.voiceReady(id) {
+      runPiper(t, voiceId: id, speed: cfg.ttsSpeed)
     } else {
-      downloadVoiceThenSpeak(t)
+      downloadVoiceThenSpeak(t, voiceId: id, speed: cfg.ttsSpeed)
     }
   }
 
-  /// 首次啟用：背景下載 Piper 語音模型（~64MB），解壓後合成。
-  private func downloadVoiceThenSpeak(_ t: String) {
+  /// 首次啟用（或換新語音）：背景下載該 Piper 語音套件，解壓後合成。
+  private func downloadVoiceThenSpeak(_ t: String, voiceId: String, speed: Double) {
     if downloading { return }
     downloading = true
     onStateChange?(true)
-    onStatus?("⏳ 首次啟用高品質朗讀：下載語音中…")
+    onStatus?("⏳ 下載語音「\(voiceId)」中…")
     try? FileManager.default.createDirectory(atPath: Self.ttsDir, withIntermediateDirectories: true)
-    guard let url = URL(string: Self.voiceURL) else {
+    guard let url = URL(string: Self.voiceURL(voiceId)) else {
       downloading = false
       speakApple(t)
       return
@@ -686,14 +705,14 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
         } catch { ok = false }
         try? FileManager.default.removeItem(atPath: dst)
       }
-      let done = ok && Self.voiceReady
+      let done = ok && Self.voiceReady(voiceId)
       Task { @MainActor in
         guard let self, self.gen == g else { return }
         self.downloading = false
         self.dlTask = nil
         self.onStatus?("")
         if done {
-          self.runPiper(t)
+          self.runPiper(t, voiceId: voiceId, speed: speed)
         } else {
           self.speakApple(t)
           self.onStatus?("語音下載失敗，暫用系統語音")
@@ -705,19 +724,29 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
   }
 
   /// 呼叫內建 sherpa-onnx-offline-tts 合成 wav 後播放（背景執行，避免卡 UI）。
-  private func runPiper(_ t: String) {
+  private func runPiper(_ t: String, voiceId: String, speed: Double) {
+    guard let onnx = Self.onnxPath(voiceId) else {
+      speakApple(t)
+      return
+    }
+    let dir = Self.voiceDir(voiceId)
     let out = NSTemporaryDirectory() + "zhlearn_tts.wav"
     try? FileManager.default.removeItem(atPath: out)
     let p = Process()
     p.executableURL = URL(fileURLWithPath: Self.helperPath)
-    p.arguments = [
-      "--vits-model=\(Self.voiceOnnx)",
-      "--vits-tokens=\(Self.voiceTokens)",
-      "--vits-data-dir=\(Self.voiceData)",
+    var args = [
+      "--vits-model=\(onnx)",
+      "--vits-tokens=\(dir)/tokens.txt",
       "--num-threads=2",
+      "--speed=\(speed)",
       "--output-filename=\(out)",
-      t,
     ]
+    let dataDir = dir + "/espeak-ng-data"
+    if FileManager.default.fileExists(atPath: dataDir) {
+      args.insert("--vits-data-dir=\(dataDir)", at: 2)
+    }
+    args.append(t)
+    p.arguments = args
     p.standardOutput = nil
     p.standardError = nil
     proc = p
@@ -759,6 +788,7 @@ private final class ZhLearnTTS: NSObject, AVSpeechSynthesizerDelegate, AVAudioPl
     }
     let body: [String: Any] = [
       "model": "kokoro", "input": t, "voice": cfg.ttsVoice, "response_format": "wav",
+      "speed": cfg.ttsSpeed,
     ]
     req.httpBody = try? JSONSerialization.data(withJSONObject: body)
     onStateChange?(true)
@@ -868,25 +898,17 @@ private final class ZhLearnPanel: NSObject {
     let trans = makeLabel(16, .white)
     trans.font = NSFont.systemFont(ofSize: 16, weight: .medium)
     trans.isSelectable = true
-    // 句末喇叭：朗讀整句英文（再按一次停止）。靠右對齊放在譯文結尾。
+    // 朗讀喇叭：併入底部控制列（見下方 btnStack），不另佔一行。
     let speaker = FlatButton("🔊", toggle: false)
     speaker.target = self
     speaker.action = #selector(speakerTapped)
-    let speakerSpacer = NSView()
-    speakerSpacer.translatesAutoresizingMaskIntoConstraints = false
-    speakerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-    speakerSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    let speakerRow = NSStackView(views: [speakerSpacer, speaker])
-    speakerRow.orientation = .horizontal
-    speakerRow.spacing = 0
-    speakerRow.translatesAutoresizingMaskIntoConstraints = false
     // 分隔線
     let divider = NSBox()
     divider.boxType = .separator
     divider.translatesAutoresizingMaskIntoConstraints = false
     // 說明 / 建議（次級、行距較鬆）
     let notes = makeLabel(12, NSColor(white: 1, alpha: 0.66))
-    let textStack = NSStackView(views: [trans, speakerRow, divider, notes])
+    let textStack = NSStackView(views: [trans, divider, notes])
     textStack.orientation = .vertical
     textStack.alignment = .leading
     textStack.spacing = 7
@@ -903,6 +925,7 @@ private final class ZhLearnPanel: NSObject {
     btnStack.orientation = .horizontal
     btnStack.spacing = 5
     btnStack.translatesAutoresizingMaskIntoConstraints = false
+    btnStack.addArrangedSubview(speaker)  // 🔊 放控制列最左
     for (i, (_, name)) in styles.enumerated() {
       let b = FlatButton(name, toggle: true)
       b.target = self
@@ -955,7 +978,6 @@ private final class ZhLearnPanel: NSObject {
       textStack.topAnchor.constraint(greaterThanOrEqualTo: region.topAnchor, constant: 2),
 
       divider.widthAnchor.constraint(equalTo: textStack.widthAnchor),
-      speakerRow.widthAnchor.constraint(equalTo: textStack.widthAnchor),
     ])
 
     self.panel = p
@@ -1104,6 +1126,20 @@ private final class ZhLearnSettings: NSObject {
   ]
   private let ttsEndpointField = NSTextField()
   private let ttsVoiceField = NSTextField()
+  private let ttsPiperVoicePopup = NSPopUpButton()
+  // 內建 Piper 可選語音（顯示名 ↔ sherpa 套件 id）
+  private let ttsPiperVoiceItems: [(String, String)] = [
+    ("Amy — 美式女聲（預設）", "en_US-amy-medium"),
+    ("HFC 女聲 — 美式、清晰", "en_US-hfc_female-medium"),
+    ("HFC 男聲 — 美式", "en_US-hfc_male-medium"),
+    ("Ryan — 美式男聲、高品質", "en_US-ryan-high"),
+    ("LibriTTS — 美式、自然", "en_US-libritts_r-medium"),
+    ("Lessac — 美式女聲、清楚", "en_US-lessac-medium"),
+    ("Alba — 英式女聲", "en_GB-alba-medium"),
+    ("Cori — 英式女聲、高品質", "en_GB-cori-high"),
+  ]
+  private let ttsSpeedSlider = NSSlider(
+    value: 1.0, minValue: 0.5, maxValue: 2.0, target: nil, action: nil)
   private let opacitySlider = NSSlider(
     value: 0.96, minValue: 0.3, maxValue: 1.0, target: nil, action: nil)
   private let shortcutRecorder = ShortcutRecorder()
@@ -1156,6 +1192,10 @@ private final class ZhLearnSettings: NSObject {
     if let idx = ttsEngineItems.firstIndex(where: { $0.1 == c.ttsEngine }) {
       ttsEnginePopup.selectItem(at: idx)
     }
+    if let idx = ttsPiperVoiceItems.firstIndex(where: { $0.1 == c.ttsPiperVoice }) {
+      ttsPiperVoicePopup.selectItem(at: idx)
+    }
+    ttsSpeedSlider.doubleValue = c.ttsSpeed
     ttsEndpointField.stringValue = c.ttsEndpoint
     ttsVoiceField.stringValue = c.ttsVoice
     opacitySlider.doubleValue = c.opacity
@@ -1183,10 +1223,16 @@ private final class ZhLearnSettings: NSObject {
     providerPopup.action = #selector(providerChanged)
     for f in [apiKeyField, modelField, baseURLField, resetField, domainField, ttsEndpointField, ttsVoiceField] {
       f.translatesAutoresizingMaskIntoConstraints = false
-      f.widthAnchor.constraint(equalToConstant: 500).isActive = true
+      f.widthAnchor.constraint(equalToConstant: 470).isActive = true
     }
     ttsEnginePopup.addItems(withTitles: ttsEngineItems.map { $0.0 })
     ttsEnginePopup.translatesAutoresizingMaskIntoConstraints = false
+    ttsPiperVoicePopup.addItems(withTitles: ttsPiperVoiceItems.map { $0.0 })
+    ttsPiperVoicePopup.translatesAutoresizingMaskIntoConstraints = false
+    ttsSpeedSlider.translatesAutoresizingMaskIntoConstraints = false
+    ttsSpeedSlider.numberOfTickMarks = 7
+    ttsSpeedSlider.allowsTickMarkValuesOnly = false
+    ttsSpeedSlider.widthAnchor.constraint(equalToConstant: 470).isActive = true
     preciseCheck.translatesAutoresizingMaskIntoConstraints = false
     englishAssistCheck.translatesAutoresizingMaskIntoConstraints = false
     liveCheck.translatesAutoresizingMaskIntoConstraints = false
@@ -1194,27 +1240,35 @@ private final class ZhLearnSettings: NSObject {
     opacitySlider.isContinuous = true
     opacitySlider.target = self
     opacitySlider.action = #selector(opacityChanged)
-    opacitySlider.widthAnchor.constraint(equalToConstant: 500).isActive = true
-    let form = NSStackView(views: [
-      labeled("API Key", apiKeyField),
-      labeled("模型 Model", modelField),
-      labeled("服務商 Provider", providerPopup),
-      labeled("自訂 Base URL（選填，留空用預設）", baseURLField),
-      labeled("重置秒數 Reset（秒，預設 2）", resetField),
-      labeled("透明度 Opacity（拖曳即時預覽）", opacitySlider),
-      labeled("反白翻譯熱鍵（選取文字後按，需輔助使用權限；Office 讀不到）", shortcutRecorder),
-      liveCheck,
-      englishAssistCheck,
-      preciseCheck,
-      labeled("用字領域 Domain（如 醫學/法律/軟體；選填）", domainField),
-      labeled("🔊 朗讀引擎 TTS", ttsEnginePopup),
-      labeled("TTS 端點（僅「自訂端點」用，預設 http://localhost:8880）", ttsEndpointField),
-      labeled("TTS 語音 Voice（端點用，如 Kokoro 的 af_heart）", ttsVoiceField),
-    ])
-    form.orientation = .vertical
-    form.alignment = .leading
-    form.spacing = 12
-    form.translatesAutoresizingMaskIntoConstraints = false
+    opacitySlider.widthAnchor.constraint(equalToConstant: 470).isActive = true
+    // 分頁，避免設定一路往下拉太長。
+    let tabs = NSTabView()
+    tabs.translatesAutoresizingMaskIntoConstraints = false
+    tabs.addTabViewItem(
+      tabItem("翻譯", [
+        labeled("API Key", apiKeyField),
+        labeled("模型 Model", modelField),
+        labeled("服務商 Provider", providerPopup),
+        labeled("自訂 Base URL（選填，留空用預設）", baseURLField),
+        labeled("用字領域 Domain（如 醫學/法律/軟體；選填）", domainField),
+        liveCheck,
+        englishAssistCheck,
+        preciseCheck,
+      ]))
+    tabs.addTabViewItem(
+      tabItem("朗讀 TTS", [
+        labeled("🔊 朗讀引擎 TTS", ttsEnginePopup),
+        labeled("朗讀語速 Speed（0.5–2.0×，預設 1）", ttsSpeedSlider),
+        labeled("高品質語音 Piper（選擇後首次自動下載）", ttsPiperVoicePopup),
+        labeled("自訂端點 Endpoint（僅「自訂端點」模式用）", ttsEndpointField),
+        labeled("端點語音 Voice（端點用，如 af_heart）", ttsVoiceField),
+      ]))
+    tabs.addTabViewItem(
+      tabItem("外觀 & 熱鍵", [
+        labeled("透明度 Opacity（拖曳即時預覽）", opacitySlider),
+        labeled("重置秒數 Reset（秒，預設 2）", resetField),
+        labeled("反白翻譯熱鍵（需輔助使用權限；Office 讀不到）", shortcutRecorder),
+      ]))
 
     let save = NSButton(title: "儲存", target: self, action: #selector(saveTapped))
     save.bezelStyle = .rounded
@@ -1227,23 +1281,45 @@ private final class ZhLearnSettings: NSObject {
     resetCostBtn.translatesAutoresizingMaskIntoConstraints = false
 
     let w = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 540, height: 772),
+      contentRect: NSRect(x: 0, y: 0, width: 540, height: 470),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     w.title = "打即通 — 設定"
     w.isReleasedWhenClosed = false
     let cv = w.contentView!
-    cv.addSubview(form)
+    cv.addSubview(tabs)
     cv.addSubview(save)
     cv.addSubview(resetCostBtn)
     NSLayoutConstraint.activate([
-      form.topAnchor.constraint(equalTo: cv.topAnchor, constant: 18),
-      form.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 20),
+      tabs.topAnchor.constraint(equalTo: cv.topAnchor, constant: 12),
+      tabs.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 16),
+      tabs.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -16),
+      tabs.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -12),
       save.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -20),
       save.bottomAnchor.constraint(equalTo: cv.bottomAnchor, constant: -16),
       resetCostBtn.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 20),
       resetCostBtn.centerYAnchor.constraint(equalTo: save.centerYAnchor),
     ])
     window = w
+  }
+
+  /// 把一組設定列包成一個分頁（內容靠上、靠左）。
+  private func tabItem(_ title: String, _ rows: [NSView]) -> NSTabViewItem {
+    let form = NSStackView(views: rows)
+    form.orientation = .vertical
+    form.alignment = .leading
+    form.spacing = 12
+    form.translatesAutoresizingMaskIntoConstraints = false
+    let container = NSView()
+    container.addSubview(form)
+    NSLayoutConstraint.activate([
+      form.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+      form.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+      form.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+    ])
+    let item = NSTabViewItem()
+    item.label = title
+    item.view = container
+    return item
   }
 
   @objc private func resetCostTapped() { ZhLearnHook.resetCost() }
@@ -1264,6 +1340,8 @@ private final class ZhLearnSettings: NSObject {
       "preciseMode": preciseCheck.state == .on,
       "domain": domainField.stringValue.trimmingCharacters(in: .whitespaces),
       "ttsEngine": ttsEngineItems[max(0, ttsEnginePopup.indexOfSelectedItem)].1,
+      "ttsPiperVoice": ttsPiperVoiceItems[max(0, ttsPiperVoicePopup.indexOfSelectedItem)].1,
+      "ttsSpeed": (ttsSpeedSlider.doubleValue * 100).rounded() / 100,
       "ttsEndpoint": ttsEndpointField.stringValue.trimmingCharacters(in: .whitespaces),
       "ttsVoice": ttsVoiceField.stringValue.trimmingCharacters(in: .whitespaces),
       "opacity": opacitySlider.doubleValue,
