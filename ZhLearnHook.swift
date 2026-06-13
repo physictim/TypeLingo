@@ -28,7 +28,38 @@ public enum ZhLearnHook {
     ) { note in
       if let s = note.object as? String { accumulate(s, caret: lastCaret) }
     }
+    // 自動學習新詞：InputHandler 在上屏時發出「原廠詞庫沒有的 2+ 字詞」清單。
+    NotificationCenter.default.addObserver(
+      forName: .init("ZhLearnLearnTerm"), object: nil, queue: .main
+    ) { note in
+      if let terms = note.object as? [String] { learnTerms(terms) }
+    }
     reRegisterHotkey()
+  }
+
+  /// 累計新詞出現次數；達 2 次就加入使用者自訂語彙（永久記住）。
+  static func learnTerms(_ terms: [String]) {
+    guard ZhLearnConfig.load().autoLearnPhrases else { return }
+    var store = ZhLearnLearnStore.load()
+    let mode = IMEApp.currentInputMode
+    var changed = false
+    for term in terms {
+      if store.added.contains(term) { continue }  // 已加入過就不再計數
+      let parts = term.components(separatedBy: "\t")
+      guard parts.count == 2, !parts[0].isEmpty, parts[1].count >= 2 else { continue }
+      store.counts[term, default: 0] += 1
+      changed = true
+      if store.counts[term, default: 0] >= 2 {
+        let phrase = UserPhraseInsertable(
+          keyArray: parts[0].components(separatedBy: "-"), value: parts[1], inputMode: mode)
+        guard phrase.isValid else { continue }
+        if LMMgr.writeUserPhrasesAtOnce(phrase, areWeFiltering: false) {
+          store.added.insert(term)
+          store.counts[term] = nil
+        }
+      }
+    }
+    if changed { store.save() }
   }
 
   /// 依設定（重新）註冊反白翻譯熱鍵。
@@ -200,6 +231,31 @@ public enum ZhLearnHook {
   }
 }
 
+/// 自動學習新詞的持久化計數（~/.zhlearnime/learn.json）。
+private struct ZhLearnLearnStore {
+  var counts: [String: Int] = [:]  // "讀音-…\t詞" → 出現次數
+  var added: Set<String> = []  // 已加入自訂語彙的詞（不再重複加）
+  static var path: String { ("~/.zhlearnime/learn.json" as NSString).expandingTildeInPath }
+  static func load() -> ZhLearnLearnStore {
+    var s = ZhLearnLearnStore()
+    guard let data = FileManager.default.contents(atPath: path),
+      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return s }
+    s.counts = (obj["counts"] as? [String: Int]) ?? [:]
+    s.added = Set((obj["added"] as? [String]) ?? [])
+    return s
+  }
+  func save() {
+    let obj: [String: Any] = ["counts": counts, "added": Array(added)]
+    try? FileManager.default.createDirectory(
+      at: URL(fileURLWithPath: Self.path).deletingLastPathComponent(),
+      withIntermediateDirectories: true)
+    if let data = try? JSONSerialization.data(withJSONObject: obj) {
+      try? data.write(to: URL(fileURLWithPath: Self.path))
+    }
+  }
+}
+
 private struct ZhLearnConfig {
   var apiKey = ""
   var model = "gpt-4o-mini"
@@ -222,6 +278,7 @@ private struct ZhLearnConfig {
   var ttsApiKey = ""  // 雲端 TTS 才需要；本機 Kokoro 留空
   var ttsPiperVoice = "en_US-amy-medium"  // 內建 Piper 引擎要用的語音
   var ttsSpeed = 1.0  // 朗讀語速倍率（1.0＝正常；>1 較快）
+  var autoLearnPhrases = true  // 自動學習新詞：原廠詞庫沒有的 2+ 字詞出現 2 次 → 自動加入自訂語彙
   /// 自動補正 TTS 端點路徑（填基底 / .../v1 / 完整路徑都接成 .../v1/audio/speech）。
   var ttsURL: String {
     var u = ttsEndpoint.trimmingCharacters(in: .whitespaces)
@@ -285,6 +342,7 @@ private struct ZhLearnConfig {
     c.ttsApiKey = obj["ttsApiKey"] as? String ?? c.ttsApiKey
     if let v = obj["ttsPiperVoice"] as? String, !v.isEmpty { c.ttsPiperVoice = v }
     c.ttsSpeed = (obj["ttsSpeed"] as? NSNumber)?.doubleValue ?? c.ttsSpeed
+    c.autoLearnPhrases = (obj["autoLearnPhrases"] as? NSNumber)?.boolValue ?? c.autoLearnPhrases
     return c
   }
   static func rawProfiles() -> [String: [String: String]] {
@@ -1122,6 +1180,9 @@ private final class ZhLearnSettings: NSObject {
     checkboxWithTitle: "英文輸入時提供寫作助理（改寫＋建議）", target: nil, action: nil)
   private let preciseCheck = NSButton(
     checkboxWithTitle: "精準翻譯（理解整句＋前文，較吃 token）", target: nil, action: nil)
+  private let autoLearnCheck = NSButton(
+    checkboxWithTitle: "自動學習新詞（詞庫沒有的 2+ 字詞出現 2 次 → 加入自訂語彙）", target: nil,
+    action: nil)
   private let domainField = NSTextField()
   private let ttsEnginePopup = NSPopUpButton()
   // 顯示名稱 ↔ 設定值
@@ -1194,6 +1255,7 @@ private final class ZhLearnSettings: NSObject {
     englishAssistCheck.state = c.englishAssist ? .on : .off
     liveCheck.state = c.liveEnabled ? .on : .off
     preciseCheck.state = c.preciseMode ? .on : .off
+    autoLearnCheck.state = c.autoLearnPhrases ? .on : .off
     domainField.stringValue = c.domain
     if let idx = ttsEngineItems.firstIndex(where: { $0.1 == c.ttsEngine }) {
       ttsEnginePopup.selectItem(at: idx)
@@ -1239,6 +1301,7 @@ private final class ZhLearnSettings: NSObject {
     ttsSpeedSlider.numberOfTickMarks = 7
     ttsSpeedSlider.allowsTickMarkValuesOnly = false
     ttsSpeedSlider.widthAnchor.constraint(equalToConstant: 470).isActive = true
+    autoLearnCheck.translatesAutoresizingMaskIntoConstraints = false
     preciseCheck.translatesAutoresizingMaskIntoConstraints = false
     englishAssistCheck.translatesAutoresizingMaskIntoConstraints = false
     liveCheck.translatesAutoresizingMaskIntoConstraints = false
@@ -1260,6 +1323,7 @@ private final class ZhLearnSettings: NSObject {
         liveCheck,
         englishAssistCheck,
         preciseCheck,
+        autoLearnCheck,
       ]))
     tabs.addTabViewItem(
       tabItem("朗讀 TTS", [
@@ -1287,7 +1351,7 @@ private final class ZhLearnSettings: NSObject {
     resetCostBtn.translatesAutoresizingMaskIntoConstraints = false
 
     let w = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 540, height: 470),
+      contentRect: NSRect(x: 0, y: 0, width: 540, height: 510),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     w.title = "打即通 — 設定"
     w.isReleasedWhenClosed = false
@@ -1344,6 +1408,7 @@ private final class ZhLearnSettings: NSObject {
       "englishAssist": englishAssistCheck.state == .on,
       "liveEnabled": liveCheck.state == .on,
       "preciseMode": preciseCheck.state == .on,
+      "autoLearnPhrases": autoLearnCheck.state == .on,
       "domain": domainField.stringValue.trimmingCharacters(in: .whitespaces),
       "ttsEngine": ttsEngineItems[max(0, ttsEnginePopup.indexOfSelectedItem)].1,
       "ttsPiperVoice": ttsPiperVoiceItems[max(0, ttsPiperVoicePopup.indexOfSelectedItem)].1,
